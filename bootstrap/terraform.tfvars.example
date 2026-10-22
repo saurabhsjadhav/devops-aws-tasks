@@ -1,0 +1,7 @@
+aws_region        = "ap-south-1"
+project_name      = "devops-task"
+environment       = "dev"
+github_repository = "your-github-username/devops-aws-task"
+
+# Set to false if this AWS account already has the token.actions.githubusercontent.com provider
+# create_github_oidc_provider = false

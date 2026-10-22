@@ -1,0 +1,5 @@
+# Copy to backend.hcl and use for local runs:
+#   terraform init -backend-config=backend.hcl
+# The bucket is created by the one-time bootstrap stack (see ../bootstrap).
+bucket = "devops-task-tfstate-123456789012"
+region = "ap-south-1"

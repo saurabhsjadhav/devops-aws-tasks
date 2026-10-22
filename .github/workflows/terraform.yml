@@ -1,0 +1,215 @@
+name: Terraform CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "app/**"
+      - "scripts/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "app/**"
+      - "scripts/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to run"
+        type: choice
+        options: [apply, destroy]
+        default: apply
+
+permissions:
+  contents: read
+
+# One run at a time: Terraform state must never be modified concurrently.
+concurrency:
+  group: terraform-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.10.5"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+  TF_VAR_domain_name: ${{ vars.DOMAIN_NAME }}
+  TF_VAR_hosted_zone_id: ${{ vars.HOSTED_ZONE_ID }}
+  TF_VAR_certificate_arn: ${{ vars.CERTIFICATE_ARN }}
+
+defaults:
+  run:
+    working-directory: terraform
+
+jobs:
+  # ---------------------------------------------------------------- static checks
+  validate:
+    name: Format, validate, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform init (no backend)
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        run: terraform validate
+
+      - uses: terraform-linters/setup-tflint@v4
+
+      - name: tflint
+        run: tflint
+
+  # ---------------------------------------------------------------- plan
+  plan:
+    name: Plan
+    needs: validate
+    if: github.event_name != 'workflow_dispatch' || inputs.action == 'apply'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC token for AWS
+      contents: read
+      pull-requests: write # post the plan as a PR comment
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: terraform plan
+        run: |
+          set +e
+          terraform plan -no-color -lock-timeout=5m > plan.txt 2>&1
+          code=$?
+          cat plan.txt
+          exit $code
+
+      - name: Comment plan on pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.readFileSync('terraform/plan.txt', 'utf8');
+            if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n... (truncated, see workflow log)';
+            const fence = '`'.repeat(3);
+            const body = '### Terraform plan\n<details><summary>Show plan</summary>\n\n' + fence + '\n' + plan + '\n' + fence + '\n</details>';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+  # ---------------------------------------------------------------- apply + verify
+  apply:
+    name: Apply and verify deployment
+    needs: plan
+    if: >
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    runs-on: ubuntu-latest
+    # Configure required reviewers on this environment for a manual approval gate.
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      # Re-plans and applies in one step instead of passing a saved plan between jobs:
+      # a plan file contains secret values and would have to be uploaded as an artifact.
+      - name: terraform apply
+        run: terraform apply -auto-approve -lock-timeout=5m
+
+      - name: Read outputs
+        id: out
+        run: |
+          echo "url=$(terraform output -raw application_url)" >> "$GITHUB_OUTPUT"
+          echo "version=$(terraform output -raw app_version)" >> "$GITHUB_OUTPUT"
+
+      - name: End-to-end validation (HTTPS, health checks, DB, S3)
+        working-directory: .
+        run: bash scripts/validate-deployment.sh "${{ steps.out.outputs.url }}"
+
+      - name: Job summary
+        if: always()
+        working-directory: .
+        run: |
+          {
+            echo "### Deployment"
+            echo "- URL: ${{ steps.out.outputs.url }}"
+            echo "- App version: \`${{ steps.out.outputs.version }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------- destroy (manual only)
+  destroy:
+    name: Destroy infrastructure
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: terraform destroy
+        run: terraform destroy -auto-approve -lock-timeout=5m

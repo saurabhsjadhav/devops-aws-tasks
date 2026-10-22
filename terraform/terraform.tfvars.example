@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars for local runs (the CI pipeline uses TF_VAR_* instead).
+
+aws_region   = "ap-south-1"
+project_name = "devops-task"
+environment  = "dev"
+
+# Option A (recommended): domain in Route 53. Terraform requests + DNS-validates the ACM
+# certificate and creates the alias record.
+domain_name    = "app.example.com"
+hosted_zone_id = "Z0123456789ABCDEFGHIJ"
+
+# Option B: DNS hosted elsewhere. Request/import a certificate in ACM yourself, then:
+# certificate_arn = "arn:aws:acm:ap-south-1:123456789012:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# hosted_zone_id  = ""
+# ...and create a CNAME from domain_name to the alb_dns_name output.
+
+# Cost switches for a short-lived demo:
+# single_nat_gateway = true   # one NAT instead of one per AZ
+# db_multi_az        = false  # single-AZ database

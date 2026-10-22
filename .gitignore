@@ -1,0 +1,22 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+plan.txt
+terraform.tfvars
+backend.hcl
+crash.log
+# commit .terraform.lock.hcl so provider versions are pinned
+terraform/app-*.zip
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
